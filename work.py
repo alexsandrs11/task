@@ -1,16 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-fomc_sp500_5d_overlay_fred.py
+fomc_sp500_plotly_final.py
 
-Берёт ставки ФРС и S&P 500 с FRED, сопоставляет даты, считает доходность за 5 торговых дней
-и строит график.
+S&P 500 и ставки ФРС с FRED, интерактивный график с цветовой кодировкой hike/cut/unch,
+подсказками +5d доходности и вертикальными линиями на датах решений.
 """
 
 import os
 from datetime import timedelta
 import pandas as pd
-import matplotlib.pyplot as plt
 from pandas_datareader import data as pdr
+import plotly.graph_objs as go
+from plotly.subplots import make_subplots
 
 # -------------------------
 # Настройки
@@ -18,16 +19,15 @@ from pandas_datareader import data as pdr
 START_YEAR = 2005
 END_YEAR = 2023
 OUTDIR = "out"
-FIG_DPI = 220
-FIGSIZE = (14, 7)
 FRED_SERIES_UPPER = "DFEDTARU"
 FRED_SERIES_LOWER = "DFEDTARL"
-FRED_SPX = "SP500"  # S&P 500 index from FRED
-
+FRED_SPX = "SP500"
 os.makedirs(OUTDIR, exist_ok=True)
 
+COLORS_MOVE = {"hike": "green", "cut": "red", "unch": "blue", "n/a": "gray"}
+
 # -------------------------
-# 1) Получаем данные ФРС с FRED
+# 1) Данные ФРС
 # -------------------------
 def fetch_fomc_decisions(start_year=START_YEAR, end_year=END_YEAR):
     start = f"{start_year}-01-01"
@@ -38,12 +38,11 @@ def fetch_fomc_decisions(start_year=START_YEAR, end_year=END_YEAR):
 
     df = pd.concat([upper, lower], axis=1).dropna()
     df.columns = ["upper", "lower"]
-
     df["ffr_mid"] = df[["upper", "lower"]].mean(axis=1).round(2)
     df = df[df["ffr_mid"].diff().fillna(0) != 0].reset_index()
     df.rename(columns={"DATE": "decision_date"}, inplace=True)
-
     df["delta_bps"] = df["ffr_mid"].diff().apply(lambda x: None if pd.isna(x) else round(x * 100))
+    df["ffr_text"] = df["lower"].astype(str) + "% – " + df["upper"].astype(str) + "%"
 
     def classify(bps):
         if bps is None:
@@ -55,12 +54,10 @@ def fetch_fomc_decisions(start_year=START_YEAR, end_year=END_YEAR):
         return "unch"
 
     df["move"] = df["delta_bps"].apply(classify)
-    df["ffr_text"] = df["lower"].astype(str) + "% – " + df["upper"].astype(str) + "%"
-
     return df
 
 # -------------------------
-# 2) Загружаем S&P 500 через FRED
+# 2) Данные S&P 500
 # -------------------------
 def download_spx(start="2005-01-01", end="2023-12-31"):
     df = pdr.DataReader(FRED_SPX, "fred", start, end)
@@ -70,14 +67,14 @@ def download_spx(start="2005-01-01", end="2023-12-31"):
     return df
 
 # -------------------------
-# 3) Сопоставление дат и расчёт +5d доходности
+# 3) Сопоставление дат и +5d доходности
 # -------------------------
-def map_decisions_to_trading_days(decisions: pd.DataFrame, prices: pd.DataFrame, forward_days=5):
+def map_decisions_to_trading_days(decisions, prices, forward_days=5):
     px = prices.set_index("Date").sort_index()
     out = []
     for _, r in decisions.iterrows():
         dec_date = pd.Timestamp(r["decision_date"])
-        window = pd.date_range(dec_date, dec_date + pd.Timedelta(days=3), freq="B")
+        window = pd.date_range(dec_date, dec_date + timedelta(days=3), freq="B")
         sub = px.reindex(window)["Close"].dropna()
         if sub.empty:
             next_idx = px.index[px.index >= dec_date]
@@ -109,50 +106,65 @@ def map_decisions_to_trading_days(decisions: pd.DataFrame, prices: pd.DataFrame,
     return pd.DataFrame(out)
 
 # -------------------------
-# 4) Построение графика
+# 4) Построение интерактивного графика
 # -------------------------
-def plot_results(prices: pd.DataFrame, mapped: pd.DataFrame, outpath=os.path.join(OUTDIR, "fomc_spx_overlay_2005_2023.png")):
-    # Используем стандартный стиль Matplotlib вместо seaborn
-    plt.style.use('ggplot')
-    
-    fig, ax = plt.subplots(figsize=FIGSIZE)
-    ax.plot(prices["Date"], prices["Close"], linewidth=1.3, label="S&P 500 (FRED)")
+def plot_interactive_colored(prices, decisions, mapped, filename=os.path.join(OUTDIR, "fomc_spx_interactive_final.html")):
+    fig = make_subplots(
+        rows=2, cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.1,
+        row_heights=[0.7, 0.3],
+        subplot_titles=("S&P 500 (FRED)", "FFR Midpoint (%)")
+    )
 
-    colors = {"hike": "#2ca02c", "cut": "#d62728", "unch": "#1f77b4", "n/a": "#7f7f7f"}
+    # S&P 500 линия
+    fig.add_trace(go.Scatter(x=prices["Date"], y=prices["Close"], name="S&P 500", line=dict(color='blue')), row=1, col=1)
 
+    # +5d доходность с подсказкой и вертикальные линии решений
     for _, r in mapped.iterrows():
-        t0 = pd.Timestamp(r["trade0"])
-        tN = pd.Timestamp(r["tradeN"])
-        c = colors.get(r["move"], "#7f7f7f")
-        ax.axvline(t0, color=c, linewidth=0.9, alpha=0.65)
-        ax.scatter([t0], [r["close0"]], s=18, color=c, edgecolor="k", zorder=5)
-        ax.scatter([tN], [r["closeN"]], s=28, color=c, marker="D", edgecolor="k", zorder=6)
-        ax.plot([t0, tN], [r["close0"], r["closeN"]], linestyle="--", linewidth=0.9, color=c, alpha=0.7)
-        x_label = t0 + timedelta(days=3)
-        try:
-            idx = (prices["Date"] - x_label).abs().idxmin()
-            y_ref = prices.loc[idx, "Close"]
-            label = f"{r['retN_pct']:+.2f}%"
-            ax.text(x_label, y_ref, label, fontsize=8, weight="bold",
-                    bbox=dict(facecolor="white", alpha=0.75, boxstyle="round,pad=0.2"))
-        except Exception:
-            pass
+        # пунктирная линия +5d доходности
+        fig.add_trace(go.Scatter(
+            x=[r["trade0"], r["tradeN"]],
+            y=[r["close0"], r["closeN"]],
+            mode="markers+lines",
+            marker=dict(color=COLORS_MOVE.get(r["move"], "gray"), size=6),
+            line=dict(dash='dash', color=COLORS_MOVE.get(r["move"], "gray")),
+            hovertemplate="Move: " + r['move'] + "<br>Return +5d: " + f"{r['retN_pct']:+.2f}%" +
+                          "<br>Date: %{x}<br>Close: %{y}<extra></extra>",
+            showlegend=False
+        ), row=1, col=1)
 
-    ax.set_title("S&P 500: FOMC Rate Decisions (2005–2023) и изменение за 5 торговых дней", fontsize=14, weight="bold")
-    ax.set_xlabel("Год", fontsize=12)
-    ax.set_ylabel("Уровень индекса (Close)", fontsize=12)
-    from matplotlib.lines import Line2D
-    legend_elems = [
-        Line2D([0], [0], color=colors["hike"], lw=2, label="hike (повышение)"),
-        Line2D([0], [0], color=colors["cut"], lw=2, label="cut (понижение)"),
-        Line2D([0], [0], color=colors["unch"], lw=2, label="unch (без изм.)"),
-    ]
-    ax.legend(handles=legend_elems, loc="upper left")
-    ax.grid(alpha=0.25)
-    fig.autofmt_xdate()
-    plt.tight_layout()
-    plt.savefig(outpath, dpi=FIG_DPI)
-    plt.close(fig)
+        # вертикальная линия на дате решения
+        fig.add_trace(go.Scatter(
+            x=[r["trade0"], r["trade0"]],
+            y=[prices["Close"].min(), prices["Close"].max()],
+            mode="lines",
+            line=dict(color=COLORS_MOVE.get(r["move"], "gray"), dash='dot'),
+            showlegend=False,
+            hoverinfo='skip'
+        ), row=1, col=1)
+
+    # FFR с цветовой кодировкой move
+    for move_type, color in COLORS_MOVE.items():
+        sub_df = decisions[decisions["move"] == move_type]
+        if not sub_df.empty:
+            fig.add_trace(go.Scatter(
+                x=sub_df["decision_date"], y=sub_df["ffr_mid"],
+                mode="lines+markers",
+                marker=dict(size=8, color=color),
+                line=dict(color=color),
+                name=move_type
+            ), row=2, col=1)
+
+    fig.update_layout(
+        height=700,
+        width=1200,
+        title_text="S&P 500 и решения ФРС (FRED) с цветовой кодировкой hike/cut/unch и +5d подсказками",
+        hovermode="x unified"
+    )
+
+    fig.write_html(filename)
+    print(f"Интерактивный график сохранён: {filename}")
 
 # -------------------------
 # Main
@@ -160,24 +172,18 @@ def plot_results(prices: pd.DataFrame, mapped: pd.DataFrame, outpath=os.path.joi
 def main():
     print("1) Получаем решения ФРС (FRED)...")
     decisions = fetch_fomc_decisions()
-    decisions.to_csv(os.path.join(OUTDIR, "fomc_decisions_2005_2023.csv"), index=False)
     print(f"  Найдено записей: {len(decisions)}")
 
     print("2) Загружаем котировки S&P 500 (FRED)...")
-    prices = download_spx(start="2005-01-01", end="2023-12-31")
-    prices.to_csv(os.path.join(OUTDIR, "spx_2005_2023_daily.csv"), index=False)
+    prices = download_spx()
     print(f"  Загружено {len(prices)} торговых строк")
 
     print("3) Сопоставляем решения с торговыми днями и считаем +5d...")
-    mapped = map_decisions_to_trading_days(decisions, prices, forward_days=5)
-    mapped.to_csv(os.path.join(OUTDIR, "fomc_overlay_spx_2005_2023.csv"), index=False)
+    mapped = map_decisions_to_trading_days(decisions, prices)
     print(f"  Записей с +5d: {len(mapped)}")
 
-    print("4) Рисуем график и сохраняем PNG...")
-    plot_results(prices, mapped, outpath=os.path.join(OUTDIR, "fomc_spx_overlay_2005_2023.png"))
-    print("Готово. Файлы в папке", OUTDIR)
+    print("4) Строим финальный интерактивный график...")
+    plot_interactive_colored(prices, decisions, mapped)
 
 if __name__ == "__main__":
     main()
-
-
